@@ -79,8 +79,12 @@ func (d *Dock) Listen() error {
 					device = &Slider{}
 				case "dial":
 					device = &Dial{}
+				case "joystick":
+					device = &Joystick{}
 				case "rainbow":
 					device = &Rainbow{}
+				default:
+					return fmt.Errorf("unknown device: %s", line.Device)
 				}
 				if device != nil {
 					input, ok := device.(Receiver)

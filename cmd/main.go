@@ -42,6 +42,12 @@ func main() {
 			device.OnChange(func(v float64) {
 				fmt.Printf("dial: %0.3f\n", v)
 			})
+		case *flotilla.Joystick:
+			device.OnChange(func(x, y float64, pressed bool) {
+
+				fmt.Printf("joystick: (x: %0.3f, y: %0.3f, b: %v)\n", x, y, pressed)
+			})
+
 		}
 	})
 	dock.OnDisconnect(func(d flotilla.Device) {
