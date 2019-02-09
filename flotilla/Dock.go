@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/tarm/serial"
 )
@@ -17,10 +18,12 @@ type Port int
 // Dock manages reading and writing to the hardware connected to the Flotilla Dock
 type Dock struct {
 	Debug        bool
-	Devices      [8]Device
+	Inputs       [9]Receiver
+	Outputs      [9]Sender
 	serial       *serial.Port
 	onConnect    []func(Device)
 	onDisconnect []func(Device)
+	mutex        sync.RWMutex
 }
 
 // NewDock opens a serial connection to the dock
@@ -45,49 +48,60 @@ func (d *Dock) Listen() error {
 	d.serial.Flush()
 	s := bufio.NewScanner(d.serial)
 	for s.Scan() {
-		line := s.Bytes()
 		if d.Debug {
-			fmt.Println(string(line))
+			fmt.Println(string(s.Bytes()))
 		}
-		r, err := d.parse(line)
+		line, err := d.parse(s.Bytes())
 		if err != nil {
 			return err
 		}
-		var device Device
-		if r.Port != 0 {
-			device = d.Devices[r.Port-1]
-		}
-		if (r.Connected || r.Update) && (device == nil || device.Type() != r.Device) {
-			if device != nil {
-				device.Disconnected()
-				device = nil
-			}
-			switch r.Device {
-			case "dial":
-				if r.Update {
-					device = NewDial()
-				}
-			case "motor":
-				device = &Motor{}
-			case "rainbow":
-				device = &Rainbow{}
-			}
-			if device != nil {
-				d.Devices[r.Port-1] = device
-				for _, callback := range d.onConnect {
-					callback(device)
+
+		if line.Connected || line.Disconnected {
+			if d.Inputs[line.Port] != nil {
+				for _, listener := range d.onDisconnect {
+					listener(d.Inputs[line.Port])
 				}
 			}
-		}
-		if r.Update && device != nil {
-			device.Input(r.Value)
-		}
-		if r.Disconnected && device != nil {
-			for _, callback := range d.onDisconnect {
-				callback(device)
+			d.Inputs[line.Port] = nil
+			if d.Outputs[line.Port] != nil {
+				for _, listener := range d.onDisconnect {
+					listener(d.Outputs[line.Port])
+				}
 			}
-			device.Disconnected()
-			d.Devices[r.Port-1] = nil
+			d.Outputs[line.Port] = nil
+
+			if line.Connected {
+				var device Device
+				switch line.Device {
+				case "motor":
+					device = &Motor{}
+				case "slider":
+					device = &Slider{}
+				case "dial":
+					device = &Dial{}
+				case "rainbow":
+					device = &Rainbow{}
+				}
+				if device != nil {
+					input, ok := device.(Receiver)
+					if ok {
+						d.Inputs[line.Port] = input
+					}
+					output, ok := device.(Sender)
+					if ok {
+						d.Outputs[line.Port] = output
+					}
+					for _, callback := range d.onConnect {
+						callback(device)
+					}
+				}
+			}
+		}
+
+		if line.Update && d.Inputs[line.Port] != nil {
+			if err := d.Inputs[line.Port].Receive(line.Value); err != nil {
+				return err
+			}
 		}
 	}
 	if s.Err() != nil {
@@ -103,7 +117,10 @@ func (d *Dock) Pipe(r io.Reader) error {
 	for s.Scan() {
 		line := s.Bytes()
 		line = append(line, eol)
-		if _, err := d.Write(line); err != nil {
+		d.mutex.Lock()
+		_, err := d.Write(line)
+		d.mutex.Unlock()
+		if err != nil {
 			return err
 		}
 	}
@@ -117,25 +134,33 @@ func (d *Dock) Write(p []byte) (int, error) {
 	return d.serial.Write(p)
 }
 
-// Update the harware based
-func (d *Dock) Update(device Device) error {
-	port, err := d.Port(device)
-	if err != nil {
-		return err
+// Update the hardware based on the Device values
+func (d *Dock) Update(s Sender) error {
+	var port Port
+	for i, o := range d.Outputs {
+		if s == o {
+			port = Port(i)
+		}
 	}
-	value, err := device.Output()
+	if port == 0 {
+		return errors.New("output not connected")
+	}
+	value, err := s.Send()
 	if err != nil {
 		return err
 	}
 	command := "s " + strconv.Itoa(int(port)) + " " + value
+
 	return d.Send(command)
 }
 
-// Send the value to a port
+// Send the command over the serial connection
 func (d *Dock) Send(command string) error {
 	if d.Debug {
 		fmt.Println(command)
 	}
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
 	if _, err := d.serial.Write([]byte(command + "\r")); err != nil {
 		return err
 	}
@@ -147,9 +172,14 @@ func (d *Dock) Port(device Device) (Port, error) {
 	if device == nil {
 		return 0, errors.New("no device given")
 	}
-	for i, x := range d.Devices {
-		if x == device {
-			return Port(i + 1), nil
+	for i, input := range d.Inputs {
+		if input == device {
+			return Port(i), nil
+		}
+	}
+	for i, input := range d.Outputs {
+		if input == device {
+			return Port(i), nil
 		}
 	}
 	return 0, errors.New("not connected")
@@ -160,12 +190,12 @@ func (d *Dock) OnConnect(callback func(Device)) {
 	d.onConnect = append(d.onConnect, callback)
 }
 
-// OnDisconnect is called when a (supported) device disconnects
+// OnDisconnect is called when a (supported) device is disconnected
 func (d *Dock) OnDisconnect(callback func(Device)) {
 	d.onDisconnect = append(d.onDisconnect, callback)
 }
 
-type result struct {
+type line struct {
 	Comment      bool
 	Update       bool
 	Connected    bool
@@ -175,30 +205,30 @@ type result struct {
 	Value        string
 }
 
-func (d *Dock) parse(line []byte) (*result, error) {
-	r := &result{}
-	switch string(line[0]) {
+func (d *Dock) parse(text []byte) (*line, error) {
+	l := &line{}
+	switch string(text[0]) {
 	case "#":
-		r.Comment = true
+		l.Comment = true
 	case "u":
-		r.Update = true
+		l.Update = true
 	case "c":
-		r.Connected = true
+		l.Connected = true
 	case "d":
-		r.Disconnected = true
+		l.Disconnected = true
 	}
-	if r.Connected || r.Disconnected || r.Update {
-		port, err := strconv.Atoi(string(line[2]))
+	if l.Connected || l.Disconnected || l.Update {
+		port, err := strconv.Atoi(string(text[2]))
 		if err != nil {
 			return nil, err
 		}
-		r.Port = Port(port)
-		r.Device = string(line[4:])
-		if r.Update {
-			pos := strings.Index(r.Device, " ")
-			r.Value = r.Device[pos+1:]
-			r.Device = r.Device[:pos]
+		l.Port = Port(port)
+		l.Device = string(text[4:])
+		if l.Update {
+			pos := strings.Index(l.Device, " ")
+			l.Value = l.Device[pos+1:]
+			l.Device = l.Device[:pos]
 		}
 	}
-	return r, nil
+	return l, nil
 }

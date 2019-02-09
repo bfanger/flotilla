@@ -1,7 +1,6 @@
 package flotilla
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 )
@@ -11,30 +10,18 @@ type Rainbow struct {
 	Colors [5]Color
 }
 
-// Type returns "motor"
-func (mr *Rainbow) Type() string {
-	return "rainbow"
-}
-
 // Set all pixels to the same color
 func (r *Rainbow) Set(red, g, b uint8) {
-	for i, _ := range r.Colors {
+	for i := range r.Colors {
 		r.Colors[i].R = red
 		r.Colors[i].G = g
 		r.Colors[i].B = b
 	}
 }
 
-// Input errors
-func (r *Rainbow) Input(value string) error {
-	return errors.New("rainbow is an output device")
-}
-func (r *Rainbow) Output() (string, error) {
+// Send the colors to the hardware
+func (r *Rainbow) Send() (string, error) {
 	return fmt.Sprintf("%s,%s,%s,%s,%s", r.Colors[0].String(), r.Colors[1].String(), r.Colors[2].String(), r.Colors[3].String(), r.Colors[4].String()), nil
-}
-
-// Disconnected rainbow
-func (r *Rainbow) Disconnected() {
 }
 
 // Color a RGB value
@@ -44,7 +31,7 @@ type Color struct {
 	B uint8
 }
 
-// Set a color
+// Set the color
 func (c *Color) Set(r, g, b uint8) {
 	c.R = r
 	c.G = g

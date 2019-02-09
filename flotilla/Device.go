@@ -1,9 +1,14 @@
 package flotilla
 
-// Device connected to the dock
-type Device interface {
-	Type() string
-	Input(string) error
-	Output() (string, error)
-	Disconnected()
+// Device represents hardware
+type Device interface{}
+
+// Receiver receives values from the hardware (Input/Sensor)
+type Receiver interface {
+	Receive(string) error
+}
+
+// Sender send values to the hardware (Output/Display)
+type Sender interface {
+	Send() (string, error)
 }
