@@ -1,6 +1,7 @@
 package flotilla
 
 import (
+	"errors"
 	"strconv"
 )
 
@@ -20,7 +21,11 @@ func NewRainbow(port int, d *Dock) *Rainbow {
 	return r
 }
 
+// Set all pixels to the same color
 func (r *Rainbow) Set(red, green, blue uint8) error {
+	if r.port == 0 {
+		return errors.New("rainbow disconnected")
+	}
 	for _, c := range r.Colors {
 		c.Red = red
 		c.Green = green
@@ -28,26 +33,24 @@ func (r *Rainbow) Set(red, green, blue uint8) error {
 	}
 	return r.d.Send(r.port, r.Colors[0].String())
 }
-func (r *Rainbow) Flush() error {
-	// @todo Update the leds based on all Color values
-	return nil
-}
 
-// Update
+// Update does nothing, Rainbow is an output device
 func (r *Rainbow) Update(value string) {
-	// implement Device interface
 }
 
+// Disconnect prevents future writes
 func (r *Rainbow) Disconnect() {
 	r.port = 0
 }
 
+// Color a RGB value
 type Color struct {
 	Red   uint8
 	Green uint8
 	Blue  uint8
 }
 
+// Set a color
 func (c *Color) Set(red, green, blue uint8) {
 	c.Red = red
 	c.Green = green
