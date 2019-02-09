@@ -9,44 +9,68 @@ import (
 )
 
 func main() {
-	tty := "/dev/tty.usbmodem14101"
-	d, err := flotilla.NewDock(tty)
+	tty := "/dev/tty.usbmodem14201"
+	dock, err := flotilla.NewDock(tty)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer dock.Close()
+	dock.Debug = true
+	// go func() {
+	// 	dock.Send("s 3 1,0,0,0,0,0,0,1,0,0,0,0,0,0,1")
+	// }()
 	go func() {
-		d.Write([]byte("e\r\n"))
-
-		// time.Sleep(50 * time.Millisecond)
-		// // d.Send(1, "1,0,0")
-		// // d.Send(1, "1,0,0,0,0,0,0,1,0,0,0,0,0,0,1")
-		// r := flotilla.NewRainbow(1, d)
-		// r.Set(1, 0, 0)
-		// time.Sleep(50 * time.Millisecond)
-		// r.Set(1, 1, 1)
-		// time.Sleep(1 * time.Second)
-		// r.Set(0, 0, 1)
-	}()
-	go func() {
-		if err := d.Pipe(os.Stdin); err != nil {
+		if err := dock.Pipe(os.Stdin); err != nil {
 			log.Println(err)
 		}
 		// os.Exit(0)
 	}()
-	d.OnConnect(func(_ flotilla.Port, d flotilla.Device) {
+	var motor *flotilla.Motor
+	var rainbow *flotilla.Rainbow
+	dock.OnConnect(func(d flotilla.Device) {
 		switch device := d.(type) {
 		case *flotilla.Dial:
 			fmt.Printf("Dial: %+v\n", device)
 			go func() {
-				for value := range device.Values() {
-					fmt.Println("value:", value)
+				for value := range device.C {
+					// fmt.Printf("value: %.2f\n", value)
+					if motor != nil {
+						motor.Forward(value)
+						if err := dock.Update(motor); err != nil {
+							log.Fatal(err)
+						}
+					}
+					if rainbow != nil {
+						v := uint8(value * 20)
+						rainbow.Colors[0].Set(v, v, 0)
+						// cmd, err = rainbow.
+						if err := dock.Update(rainbow); err != nil {
+							log.Fatal(err)
+						}
+					}
 				}
 			}()
+		case *flotilla.Motor:
+			fmt.Printf("Motor: %+v\n", device)
+			motor = device
+		case *flotilla.Rainbow:
+			fmt.Printf("Rainbow: %+v\n", device)
+			rainbow = device
+			dock.Update(rainbow)
 		default:
-			fmt.Printf("Device connected: %+v\n", d)
+			fmt.Printf("Device connected: %+v\n", device)
 		}
 	})
-	if err := d.Listen(); err != nil {
+	dock.OnDisconnect(func(device flotilla.Device) {
+		fmt.Printf("Device disconnected: %+v\n", device)
+		if motor == device {
+			motor = nil
+		}
+		if rainbow == device {
+			rainbow = nil
+		}
+	})
+	if err := dock.Listen(); err != nil {
 		log.Fatal(err)
 	}
 }

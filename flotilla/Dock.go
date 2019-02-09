@@ -2,6 +2,7 @@ package flotilla
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -15,13 +16,14 @@ type Port int
 
 // Dock manages reading and writing to the hardware connected to the Flotilla Dock
 type Dock struct {
-	Debug     bool
-	Devices   [8]Device
-	serial    *serial.Port
-	onConnect []func(Port, Device)
+	Debug        bool
+	Devices      [8]Device
+	serial       *serial.Port
+	onConnect    []func(Device)
+	onDisconnect []func(Device)
 }
 
-// NewDock connect to a
+// NewDock opens a serial connection to the dock
 func NewDock(tty string) (*Dock, error) {
 	s, err := serial.OpenPort(&serial.Config{Name: tty, Baud: 115200})
 	if err != nil {
@@ -51,29 +53,40 @@ func (d *Dock) Listen() error {
 		if err != nil {
 			return err
 		}
-		device := d.Devices[r.Port-1]
+		var device Device
+		if r.Port != 0 {
+			device = d.Devices[r.Port-1]
+		}
 		if (r.Connected || r.Update) && (device == nil || device.Type() != r.Device) {
 			if device != nil {
-				device.Disconnect()
+				device.Disconnected()
 				device = nil
 			}
 			switch r.Device {
 			case "dial":
-				device = NewDial(d)
-
+				if r.Update {
+					device = NewDial()
+				}
+			case "motor":
+				device = &Motor{}
+			case "rainbow":
+				device = &Rainbow{}
 			}
 			if device != nil {
 				d.Devices[r.Port-1] = device
 				for _, callback := range d.onConnect {
-					callback(r.Port, device)
+					callback(device)
 				}
 			}
 		}
 		if r.Update && device != nil {
-			device.Update(r.Value)
+			device.Input(r.Value)
 		}
 		if r.Disconnected && device != nil {
-			device.Disconnect()
+			for _, callback := range d.onDisconnect {
+				callback(device)
+			}
+			device.Disconnected()
 			d.Devices[r.Port-1] = nil
 		}
 	}
@@ -104,19 +117,52 @@ func (d *Dock) Write(p []byte) (int, error) {
 	return d.serial.Write(p)
 }
 
-// Send the value to a port
-func (d *Dock) Send(port int, value string) error {
-	command := "s " + strconv.Itoa(port) + " " + value + "\r\n"
-	if d.Debug {
-		fmt.Print(command)
+// Update the harware based
+func (d *Dock) Update(device Device) error {
+	port, err := d.Port(device)
+	if err != nil {
+		return err
 	}
-	_, err := d.serial.Write([]byte(command))
-	return err
+	value, err := device.Output()
+	if err != nil {
+		return err
+	}
+	command := "s " + strconv.Itoa(int(port)) + " " + value
+	return d.Send(command)
+}
+
+// Send the value to a port
+func (d *Dock) Send(command string) error {
+	if d.Debug {
+		fmt.Println(command)
+	}
+	if _, err := d.serial.Write([]byte(command + "\r")); err != nil {
+		return err
+	}
+	return d.serial.Flush()
+}
+
+// Port of a device
+func (d *Dock) Port(device Device) (Port, error) {
+	if device == nil {
+		return 0, errors.New("no device given")
+	}
+	for i, x := range d.Devices {
+		if x == device {
+			return Port(i + 1), nil
+		}
+	}
+	return 0, errors.New("not connected")
 }
 
 // OnConnect is called when a (supported) device connects
-func (d *Dock) OnConnect(callback func(Port, Device)) {
+func (d *Dock) OnConnect(callback func(Device)) {
 	d.onConnect = append(d.onConnect, callback)
+}
+
+// OnDisconnect is called when a (supported) device disconnects
+func (d *Dock) OnDisconnect(callback func(Device)) {
+	d.onDisconnect = append(d.onDisconnect, callback)
 }
 
 type result struct {
